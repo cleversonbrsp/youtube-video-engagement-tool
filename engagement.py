@@ -22,6 +22,31 @@ DEFAULT_PROGRESS_FILE = Path(__file__).parent / "progress.json"
 DEFAULT_URLS_FILE = Path(__file__).parent / "urls.txt"
 DEFAULT_DELAY_SECONDS = 3
 MAX_COMMENT_LENGTH = 10000
+MAX_RETRIES = 3
+RETRY_DELAY = 5
+
+
+class QuotaExceededError(Exception):
+    """Cota da API excedida - pare de processar."""
+    pass
+
+
+def _is_quota_exceeded(exc: HttpError) -> bool:
+    details = getattr(exc, "error_details", None) or []
+    if isinstance(details, list):
+        for item in details:
+            if isinstance(item, dict) and item.get("reason") == "quotaExceeded":
+                return True
+    return False
+
+
+def _is_backend_error(exc: HttpError) -> bool:
+    details = getattr(exc, "error_details", None) or []
+    if isinstance(details, list):
+        for item in details:
+            if isinstance(item, dict) and item.get("reason") == "backendError":
+                return True
+    return False
 
 
 def load_urls(path: Path) -> list[str]:
@@ -53,6 +78,24 @@ def save_progress(path: Path, completed: set[str]) -> None:
     )
 
 
+def _call_with_retry(callback, *args, **kwargs):
+    """Executa callback com retry em backendError. Levanta QuotaExceededError se cota excedida."""
+    last_error = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            return callback(*args, **kwargs)
+        except HttpError as e:
+            last_error = e
+            if _is_quota_exceeded(e):
+                raise QuotaExceededError("Cota da API excedida. Tente novamente amanhã.") from e
+            if _is_backend_error(e) and attempt < MAX_RETRIES - 1:
+                print(f"    [Retry {attempt + 1}/{MAX_RETRIES}] Erro temporário, aguardando {RETRY_DELAY}s...")
+                time.sleep(RETRY_DELAY)
+            else:
+                raise
+    raise last_error
+
+
 def process_video(
     youtube,
     channel_id: str,
@@ -65,6 +108,7 @@ def process_video(
     """
     Like and optionally comment on a single video.
     Returns True on success, False on failure.
+    Raises QuotaExceededError se cota da API for excedida.
     """
     if dry_run:
         print(f"  [DRY-RUN] Like em {video_id}")
@@ -76,8 +120,10 @@ def process_video(
 
     # Like
     try:
-        rate_video(youtube, video_id, "like")
+        _call_with_retry(rate_video, youtube, video_id, "like")
         print(f"  ✓ Like em {video_id}")
+    except QuotaExceededError:
+        raise
     except HttpError as e:
         err_detail = e.error_details if hasattr(e, "error_details") else str(e)
         errors.append(f"Like: {err_detail}")
@@ -92,12 +138,13 @@ def process_video(
             errors.append(f"Comentário: texto excede {MAX_COMMENT_LENGTH} caracteres")
         else:
             try:
-                result = insert_comment(
-                    youtube, video_id, comment_text,
-                    fallback_channel_id=channel_id,
-                    verbose=verbose,
+                result = _call_with_retry(
+                    insert_comment, youtube, video_id, comment_text,
+                    fallback_channel_id=channel_id, verbose=verbose,
                 )
                 print(f"  ✓ Comentário em {video_id}" + (f" (ID: {result.get('id', 'N/A')})" if verbose else ""))
+            except QuotaExceededError:
+                raise
             except (HttpError, ValueError) as e:
                 err_detail = e.error_details if hasattr(e, "error_details") else str(e)
                 errors.append(f"Comentário: {err_detail}")
@@ -167,6 +214,11 @@ Exemplos:
         action="store_true",
         help="Mostrar detalhes de debug (ID do comentário, canal usado)",
     )
+    parser.add_argument(
+        "--show-pending",
+        action="store_true",
+        help="Listar vídeos pendentes e salvar em pending_urls.txt e pending_comentarios.txt",
+    )
     args = parser.parse_args()
 
     # Load URLs
@@ -192,7 +244,7 @@ Exemplos:
         print("Nenhum vídeo válido para processar.")
         return 0
 
-    # Load comments (opcional)
+    # Load comments (opcional) - necessário antes de --show-pending
     comment_texts: list[str | None] = []
     if args.comment:
         comment_texts = [args.comment] * len(video_ids)
@@ -208,6 +260,32 @@ Exemplos:
         comment_texts = [lines[i] if i < len(lines) else None for i in range(len(video_ids))]
     else:
         comment_texts = [None] * len(video_ids)
+
+    # --show-pending: listar pendentes e salvar arquivos
+    if args.show_pending:
+        completed = load_progress(args.progress_file)
+        valid_urls = [u for u in urls if extract_video_id(u)]
+        pending_urls = []
+        pending_comments = []
+        for i, vid in enumerate(video_ids):
+            if vid not in completed:
+                pending_urls.append(valid_urls[i])
+                pending_comments.append(comment_texts[i] or "")
+
+        out_dir = args.urls.parent
+        pending_urls_path = out_dir / "pending_urls.txt"
+        pending_comments_path = out_dir / "pending_comentarios.txt"
+
+        pending_urls_path.write_text("\n".join(pending_urls) + ("\n" if pending_urls else ""), encoding="utf-8")
+        pending_comments_path.write_text("\n".join(pending_comments) + ("\n" if pending_comments else ""), encoding="utf-8")
+
+        print(f"Pendentes: {len(pending_urls)} de {len(video_ids)}")
+        print(f"Salvos em: {pending_urls_path}")
+        print(f"          {pending_comments_path}")
+        print("\nPara processar só os pendentes:")
+        pf = args.progress_file
+        print(f"  python engagement.py --urls {pending_urls_path} --comment-file {pending_comments_path} --progress-file {pf} --delay 8")
+        return 0
 
     # Authenticate primeiro (mostra canal sempre, inclusive quando não há nada a processar)
     youtube = None
@@ -239,23 +317,29 @@ Exemplos:
         print("Modo DRY-RUN ativado (nenhuma ação real)")
 
     success_count = 0
-    for idx, (video_id, comment_text) in enumerate(to_process, 1):
-        print(f"\n[{idx}/{len(to_process)}] Processando {video_id}...")
-        ok = process_video(
-            youtube,
-            channel_id,
-            video_id,
-            comment_text,
-            args.dry_run,
-            args.delay,
-            verbose=args.verbose,
-        )
-        if ok:
-            completed.add(video_id)
-            success_count += 1
-            save_progress(args.progress_file, completed)
-        else:
-            print(f"  Vídeo {video_id} teve falhas (não marcado como completo)")
+    try:
+        for idx, (video_id, comment_text) in enumerate(to_process, 1):
+            print(f"\n[{idx}/{len(to_process)}] Processando {video_id}...")
+            ok = process_video(
+                youtube,
+                channel_id,
+                video_id,
+                comment_text,
+                args.dry_run,
+                args.delay,
+                verbose=args.verbose,
+            )
+            if ok:
+                completed.add(video_id)
+                success_count += 1
+                save_progress(args.progress_file, completed)
+            else:
+                print(f"  Vídeo {video_id} teve falhas (não marcado como completo)")
+    except QuotaExceededError as e:
+        save_progress(args.progress_file, completed)
+        print(f"\n⚠️  {e}", file=sys.stderr)
+        print(f"Progresso salvo: {success_count} vídeos. Execute novamente amanhã para continuar.", file=sys.stderr)
+        return 1
 
     print(f"\nConcluído: {success_count} vídeos processados com sucesso.")
     if args.comment or args.comment_file:

@@ -7,3 +7,5 @@ progress.json
 urls.txt
 comentarios.txt
 lotes/*.txt
+pending_urls.txt
+pending_comentarios.txt

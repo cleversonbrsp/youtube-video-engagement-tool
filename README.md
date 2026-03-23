@@ -10,6 +10,8 @@ Ferramenta para dar **like** e **comentar** em vídeos do YouTube em lote, usand
 - **Dry-run**: simular sem executar
 - **Retomada**: continua de onde parou em caso de interrupção
 - **Verbose**: exibe canal em uso e ID dos comentários criados
+- **Pendentes**: `--show-pending` lista o que faltou e gera arquivos para retomar
+- Parada automática ao exceder cota da API, com retry em erros temporários
 - Tratamento de erros por vídeo
 
 ---
@@ -102,6 +104,8 @@ python engagement.py --urls urls.txt --comment-file comentarios.txt -v --delay 8
 | `--delay` | 3 | Segundos entre requisições |
 | `--dry-run` | - | Simular sem executar |
 | `--no-resume` | - | Ignorar progresso e reprocessar tudo |
+| `--progress-file` | `progress.json` | Arquivo de progresso para retomada |
+| `--show-pending` | - | Listar pendentes e salvar pending_urls.txt / pending_comentarios.txt |
 | `--verbose`, `-v` | - | Exibir detalhes de debug |
 
 ### Teste em um vídeo
@@ -141,10 +145,26 @@ Para dividir `urls.txt` e `comentarios.txt` em arquivos de 150 itens na pasta `l
 python split_batches.py
 ```
 
-Depois rode um lote por dia:
+Depois rode um lote por dia (use `--progress-file` por lote para não misturar progresso):
 
 ```bash
-python engagement.py --urls lotes/urls_1.txt --comment-file lotes/comentarios_1.txt --no-resume --delay 8
+python engagement.py --urls lotes/urls_1.txt --comment-file lotes/comentarios_1.txt --progress-file progress_1.json --delay 8
+```
+
+> **Cota excedida?** O script para automaticamente e salva o progresso. Execute no dia seguinte para continuar.
+
+### Ver vídeos pendentes
+
+Se a execução for interrompida (cota, Ctrl+C), use `--show-pending` para gerar arquivos só com o que faltou:
+
+```bash
+python engagement.py --urls lotes/urls_1.txt --comment-file lotes/comentarios_1.txt --progress-file progress_1.json --show-pending
+```
+
+Isso cria `lotes/pending_urls.txt` e `lotes/pending_comentarios.txt` na pasta do arquivo de URLs. Depois rode:
+
+```bash
+python engagement.py --urls lotes/pending_urls.txt --comment-file lotes/pending_comentarios.txt --progress-file progress_1.json --delay 8
 ```
 
 ---
