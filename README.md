@@ -119,15 +119,33 @@ python test_single_comment.py VIDEO_ID "Texto do comentário"
 ```
 youtube-video-engagement-tool/
 ├── engagement.py             # Script principal
-├── youtube_client.py        # Cliente API e OAuth
-├── test_single_comment.py   # Teste em um vídeo
+├── youtube_client.py         # Cliente API e OAuth
+├── test_single_comment.py    # Teste em um vídeo
+├── split_batches.py          # Divide em lotes de 150
 ├── requirements.txt
-├── urls.txt.example         # Modelo para urls.txt
-├── comentarios.txt.example  # Modelo para comentarios.txt
+├── urls.txt.example          # Modelo para urls.txt
+├── comentarios.txt.example   # Modelo para comentarios.txt
+├── lotes/                    # URLs e comentários divididos
+│   ├── README.md
+│   ├── urls_1.txt
+│   ├── comentarios_1.txt
+│   └── ...
 └── README.md
 ```
 
-Copie os arquivos `.example` para `urls.txt` e `comentarios.txt` antes de usar. Arquivos sensíveis/gerados (urls.txt, comentarios.txt, client_secret.json, token.json, progress.json) estão no `.gitignore`.
+### Dividir em lotes (evitar cota diária)
+
+Para dividir `urls.txt` e `comentarios.txt` em arquivos de 150 itens na pasta `lotes/`:
+
+```bash
+python split_batches.py
+```
+
+Depois rode um lote por dia:
+
+```bash
+python engagement.py --urls lotes/urls_1.txt --comment-file lotes/comentarios_1.txt --no-resume --delay 8
+```
 
 ---
 
@@ -139,6 +157,7 @@ O progresso é salvo em `progress.json`. Se o script for interrompido, execute n
 
 ## Observações
 
+- **Cota da API**: 10.000 unidades/dia (grátis). ~52 unidades por vídeo (like + comentário). Use `split_batches.py` e rode um lote por dia (~150 vídeos) para ficar dentro da cota
 - Use `--delay 8` ou maior ao comentar em vários vídeos para reduzir chance de spam filter
 - Comentários idênticos em muitos vídeos podem ser filtrados pelo YouTube
 - Vídeos "Para crianças" não aceitam comentários
